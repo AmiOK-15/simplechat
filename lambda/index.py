@@ -4,6 +4,109 @@ import os
 import boto3
 import re  # 正規表現モジュールをインポート
 from botocore.exceptions import ClientError
+# app.py
+import json
+import os
+import re
+import boto3
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from botocore.exceptions import ClientError
+
+app = FastAPI()
+
+# グローバル変数
+bedrock_client = None
+
+# モデルID
+MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
+
+def initialize_bedrock_client():
+    global bedrock_client
+    if bedrock_client is None:
+        # Colab上なので、適当なリージョンを設定
+        bedrock_client = boto3.client('bedrock-runtime', region_name="us-east-1")
+        print(f"Initialized Bedrock client in region: us-east-1")
+
+@app.post("/invoke")
+async def invoke_model(request: Request):
+    try:
+        initialize_bedrock_client()
+
+        body = await request.json()
+        message = body['message']
+        conversation_history = body.get('conversationHistory', [])
+
+        print("Processing message:", message)
+        print("Using model:", MODEL_ID)
+
+        # 会話履歴を構築
+        messages = conversation_history.copy()
+        messages.append({
+            "role": "user",
+            "content": message
+        })
+
+        bedrock_messages = []
+        for msg in messages:
+            if msg["role"] == "user":
+                bedrock_messages.append({
+                    "role": "user",
+                    "content": [{"text": msg["content"]}]
+                })
+            elif msg["role"] == "assistant":
+                bedrock_messages.append({
+                    "role": "assistant",
+                    "content": [{"text": msg["content"]}]
+                })
+
+        request_payload = {
+            "messages": bedrock_messages,
+            "inferenceConfig": {
+                "maxTokens": 512,
+                "stopSequences": [],
+                "temperature": 0.7,
+                "topP": 0.9
+            }
+        }
+
+        print("Calling Bedrock invoke_model API with payload:", json.dumps(request_payload))
+
+        response = bedrock_client.invoke_model(
+            modelId=MODEL_ID,
+            body=json.dumps(request_payload),
+            contentType="application/json"
+        )
+
+        response_body = json.loads(response['body'].read())
+        print("Bedrock response:", json.dumps(response_body, default=str))
+
+        if not response_body.get('output') or not response_body['output'].get('message') or not response_body['output']['message'].get('content'):
+            raise Exception("No response content from the model")
+
+        assistant_response = response_body['output']['message']['content'][0]['text']
+
+        # アシスタントの応答を会話履歴に追加
+        messages.append({
+            "role": "assistant",
+            "content": assistant_response
+        })
+
+        return JSONResponse(content={
+            "success": True,
+            "response": assistant_response,
+            "conversationHistory": messages
+        })
+
+    except Exception as error:
+        print("Error:", str(error))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(error)
+            }
+        )
 
 
 # Lambda コンテキストからリージョンを抽出する関数
